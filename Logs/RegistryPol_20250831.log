@@ -1,0 +1,13 @@
+2025-08-31 17:59:45 Machine Registry.pol 正常 (E00000)、バックアップ作成: C:\work\RegistryPolCheck\Backup\20250831_175945_Machine_Registry.pol
+2025-08-31 17:59:46 警告: User Registry.pol 異常、状態 = E01001 (ファイル不存在)
+2025-08-31 17:59:46 Registry.pol ファイルに問題を検出: User: E01001 (ファイル不存在)
+2025-08-31 17:59:46 通知バッチが存在しません: C:\Scripts\TexpostNotify.bat
+2025-08-31 18:30:03 Machine Registry.pol 正常 (E00000)、本日のバックアップは既に存在
+[2025-08-31] [22:28:45] [INFO] [E00000] 検査開始
+[2025-08-31] [22:28:45] [INFO] [E00000] Machine Registry.pol 検査実施 → 正常
+[2025-08-31] [22:28:45] [INFO] [E00000] Machine Registry.pol バックアップ処理 → 本日のバックアップは既に存在
+[2025-08-31] [22:28:45] [INFO] [E00000] 検査終了
+[2025-08-31] [22:29:17] [INFO] [E00000] 検査開始
+[2025-08-31] [22:29:17] [INFO] [E00000] Machine Registry.pol 検査実施 → 正常
+[2025-08-31] [22:29:17] [INFO] [E00000] Machine Registry.pol バックアップ処理 → 作成: C:\work\RegistryPolCheck\Backup\20250831_222917_Machine_Registry.pol
+[2025-08-31] [22:29:17] [INFO] [E00000] 検査終了
