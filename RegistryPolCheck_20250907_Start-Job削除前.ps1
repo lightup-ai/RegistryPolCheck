@@ -19,8 +19,8 @@
 # エラーレベルとコード例：
 # - I00000: 正常終了
 # - W01001: バックアップ失敗
-# - W01002: 古いバックアップ／ログ削除失敗
-# - W01003: ファイル取得失敗
+# - W01002: 古いバックアップ削除失敗
+# - W01003: 古いログ削除失敗
 # - W01004: 管理者権限なし警告
 # - E01001: ファイル存在しません
 # - E01002: サイズ0
@@ -91,8 +91,7 @@ function Write-Log {
         Add-Content -Path $script:LogFile -Value $line -ErrorAction Stop
         Write-Output $line
     } catch {
-        $msg = "ログファイルへの書き込みができません: $_"
-        Write-Output $msg
+        Write-Error "ログファイルへの書き込みができません: $_"
     }
 }
 
@@ -116,16 +115,16 @@ function Invoke-Notify {
     if (Test-Path $NotifyBat) {
 		Write-Log -Level "INFO" -Code "I00000" -Message "外部通知バッチ実行: $NotifyBat (レベル： $Level)"
         try {
-            # $notifyArgs = "-s", $s, "-i", "`"A $Message`"", "-c", "kibt"
-            $notifyArgs = @("-s", $s, "-i", "`"A $Message`"", "-c", "kibt")
-
-            # Start-Process方式に変更
-            $process = Start-Process -FilePath $NotifyBat -ArgumentList $notifyArgs -PassThru -WindowStyle Hidden
+            $notifyArgs = "-s", $s, "-i", "`"A $Message`"", "-c", "kibt"
+            $job = Start-Job -Name "NotifyBatch" -ScriptBlock {
+                param($bat, $notifyArgs)
+                & $bat @notifyArgs
+                return $LASTEXITCODE
+            } -ArgumentList $NotifyBat, $notifyArgs
             
-            # タイムアウト付きで待機
-            if (Wait-Process -Id $process.Id -Timeout $NotifyTimeoutSeconds -ErrorAction SilentlyContinue) {
-                # 正常終了した場合
-                $exitCode = $process.ExitCode
+            if (Wait-Job $job -Timeout $NotifyTimeoutSeconds) {
+                $exitCode = Receive-Job $job
+                Remove-Job $job -ErrorAction SilentlyContinue
 
                 if ($exitCode -ne 0) {
                     Write-Log -Level "ERROR" -Code "E09996" -Message "通知バッチの実行に失敗しました。戻り値異常: ExitCode=$exitCode | $NotifyBat （レベル： $Level）"
@@ -134,16 +133,10 @@ function Invoke-Notify {
                 }
 
             } else {
-                # タイムアウトした場合
-                try {
-                    Stop-Process -Id $process.Id -Force -ErrorAction Stop
-                    Write-Log -Level "WARN" -Code "W09999" -Message "タイムアウトした通知バッチを強制終了しました: PID=$($process.Id)"
-                } catch {
-                    # プロセスが既に終了している場合など
-                    Write-Log -Level "INFO" -Code "I09999" -Message "通知バッチ終了処理: Stop-Process 実行時に例外発生（既に終了している可能性あり）: $($_.Exception.Message)"
-                }
-                Write-Log -Level "ERROR" -Code "E09996" -Message "通知バッチの実行がタイムアウトしました（$NotifyTimeoutSeconds 秒）: $NotifyBat"
-            }     
+                Stop-Job $job -ErrorAction SilentlyContinue
+                Remove-Job $job -Force -ErrorAction SilentlyContinue
+                Write-Log -Level "ERROR" -Code "E09996" -Message "通知バッチの実行がタイムアウトしました（ $NotifyTimeoutSeconds 秒）: $NotifyBat"
+            }         
         }
         catch {
             Write-Log -Level "ERROR" -Code "E09996" -Message "通知バッチ実行中に例外が発生: $($_.Exception.Message)"
@@ -167,42 +160,56 @@ function Test-PolFile {
     # ただし本サーバーに LGPO.exe が存在しない可能性があるため、
     # 一時的に利用部分をコメントアウトしている。
     # 将来的に内容チェックを行う場合は、LGPO.exe を導入し再度有効化すること。
+    if ($LGPOPath -and (Test-Path $LGPOPath)) {
+        try {
+            <#
+            $process = Start-Process -FilePath $LGPOPath -ArgumentList "/parse /q /m $polPath" -PassThru
+            if (-not (Wait-Process -Id $process.Id -Timeout $LGPOTimeoutSeconds -ErrorAction SilentlyContinue)) {
+                Stop-Process -Id $process.Id -Force
+                throw "LGPO実行がタイムアウトしました（${LGPOTimeoutSeconds}秒）"
+            }
+            $exitCode = $process.ExitCode
+            if ($exitCode -ne 0) {
+                throw "LGPO解析に失敗しました。ExitCode=$exitCode"
+            }
+            #>
+            $job = Start-Job -Name "LGPOCheck-$key" -ScriptBlock {
+                param($lgpoPath, $polPath)
+                Start-Process -FilePath $lgpoPath -ArgumentList "/parse", "/m", $polPath -Wait -PassThru -NoNewWindow -RedirectStandardOutput $env:TEMP\lgpo_out.txt -RedirectStandardError $env:TEMP\lgpo_err.txt
+            } -ArgumentList $LGPOPath, $path
 
-    # LGPO.exe 実行 (timeout付き)
-	try {
-	    $outFile = Join-Path $env:TEMP "lgpo_out.txt"
-	    $errFile = Join-Path $env:TEMP "lgpo_err.txt"
+            if (Wait-Job $job -Timeout $LGPOTimeoutSeconds) {
+                $process = Receive-Job $job
+                Remove-Job $job -ErrorAction SilentlyContinue
+                if ($process.ExitCode -ne 0) {
+                    $errorContent = Get-Content $env:TEMP\lgpo_err.txt -ErrorAction SilentlyContinue
+                    # Write-Log -Level "ERROR" -Code "E01003" -Message "LGPO解析に失敗しました: $errorContent"
+                    # errorContentが文字列であることを確認する
+                    $errorString = if ($errorContent) {
+                        ($errorContent | Out-String).Trim() 
+                    } else {
+                        "詳細エラー情報なし"
+                    }                    
+                    $ErrorDetails.Value = "LGPO解析に失敗しました: $errorString"
+                    return "E01003"
+                }                               
+            } else {
+                Stop-Job $job -ErrorAction SilentlyContinue
+                Remove-Job $job -Force -ErrorAction SilentlyContinue
+                $ErrorDetails.Value = "LGPO実行がタイムアウトしました（ $LGPOTimeoutSeconds 秒）"
+                return "E01003"
+            }
+            
+        } catch {
+            # Write-Log -Level "ERROR" -Code "E01003" -Message "LGPO実行異常: $($_.Exception.Message)"
+            $ErrorDetails.Value = "LGPO実行異常: $($_.Exception.Message)"
+            return "E01003"
+        } finally {
+            # 一時ファイルの削除
+            Remove-Item $env:TEMP\lgpo_out.txt, $env:TEMP\lgpo_err.txt -ErrorAction SilentlyContinue
+        }
+    }
 
-	    $proc = Start-Process -FilePath $LGPOPath `
-	        -ArgumentList "/parse","/m",$path `
-	        -PassThru `
-	        -NoNewWindow `
-	        -RedirectStandardOutput $outFile `
-	        -RedirectStandardError $errFile
-        
-		if (-not (Wait-Process -Id $proc.Id -Timeout $LGPOTimeoutSeconds -ErrorAction SilentlyContinue)) {
-		    Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
-		    $ErrorDetails.Value = "LGPO実行がタイムアウトしました（${LGPOTimeoutSeconds}秒）"
-		    return "E01003"
-		}
-
-	    if ($proc.ExitCode -ne 0) {
-	        $errorString = if (Test-Path $errFile) {
-	            (Get-Content $errFile -Raw).Trim()
-	        } else {
-	            "詳細エラー情報なし"
-	        }
-	        $ErrorDetails.Value = "LGPO解析に失敗しました: $errorString"
-	        return "E01003"
-	    }
-	}
-	catch {
-	    $ErrorDetails.Value = "LGPO実行異常: $($_.Exception.Message)"
-	    return "E01003"
-	}
-	finally {
-	    Remove-Item $outFile,$errFile -ErrorAction SilentlyContinue
-	}
     return "I00000"  # 正常
 }
 
@@ -401,11 +408,17 @@ catch {
     $msg = "スクリプト実行中に予期しないエラーが発生しました: $($_.Exception.Message)"
     Write-Log -Level "ERROR" -Code "E09999" -Message $msg    
     Invoke-Notify -Level "ERROR" -Message $msg
-    exit 1   # タスクスケジューラが失敗と判定できるように、非ゼロ終了コードで終了する
+    exit 1
 } finally {
     # 一時ファイルを削除する
     Remove-Item $env:TEMP\lgpo_out.txt, $env:TEMP\lgpo_err.txt -ErrorAction SilentlyContinue
-    Remove-Item $tempLogFile -ErrorAction SilentlyContinue
+    
+    # 残留している可能性のあるジョブをクリーンアップする
+    Get-Job -Name "*LGPOCheck*", "*NotifyBatch*" -ErrorAction SilentlyContinue | 
+        ForEach-Object {
+            Stop-Job $_ -ErrorAction SilentlyContinue
+            Remove-Job $_ -Force -ErrorAction SilentlyContinue 
+        }
     
     # スクリプト完了ログ
     if ($script:LogFile) {
