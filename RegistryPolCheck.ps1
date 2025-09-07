@@ -201,7 +201,7 @@ function Test-PolFile {
 	    return "E01003"
 	}
 	finally {
-	    Remove-Item $outFile,$errFile -ErrorAction SilentlyContinue
+        Remove-Item $outFile,$errFile -ErrorAction SilentlyContinue
 	}
     return "I00000"  # 正常
 }
@@ -403,10 +403,9 @@ catch {
     Invoke-Notify -Level "ERROR" -Message $msg
     exit 1   # タスクスケジューラが失敗と判定できるように、非ゼロ終了コードで終了する
 } finally {
-    # 一時ファイルを削除する
-    Remove-Item $env:TEMP\lgpo_out.txt, $env:TEMP\lgpo_err.txt -ErrorAction SilentlyContinue
+    # 一時ログ (Init用) を削除する
     Remove-Item $tempLogFile -ErrorAction SilentlyContinue
-    
+
     # スクリプト完了ログ
     if ($script:LogFile) {
         Write-Log -Level "INFO" -Code "I00000" -Message "スクリプト実行完了"
