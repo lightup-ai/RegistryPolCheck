@@ -67,7 +67,7 @@ $LGPOTimeoutSeconds   = 30
 
 # グローバルエラー処理設定
 $ErrorActionPreference = "Continue"  # エラーが発生した場合でも実行を継続する
-$ProgressPreference = "SilentlyContinue"  # タスクスケジューラでの表示問題を回避するため、プログレスバーを無効化します。
+$ProgressPreference = "SilentlyContinue"  # タスクスケジューラでの表示問題を回避するため、プログレスバーを無効化する
 
 # --- ログ出力関数 ---
 function Write-Log {
@@ -100,11 +100,11 @@ function Write-Log {
 function Invoke-Notify {
     param(
         [ValidateSet("WARN", "ERROR", "MINOR")]
-        [string]$Level,   # "ERROR" or "WARN"
+        [string]$Level,   # 通知レベル（WARN/ERROR/MINOR）
         [string]$Message
     )
 
-    # Level → s値 のマッピング
+    # Level → -s値 のマッピング
     $map = @{
         "WARN"  = "1"        
         "ERROR" = "2"
@@ -114,41 +114,48 @@ function Invoke-Notify {
     if (-not $s) { $s = "3" }  # fallback: 未定義LevelはMINOR扱い
 
     if (Test-Path $NotifyBat) {
+        # 通知バッチ実行開始ログ
 		Write-Log -Level "INFO" -Code "I00000" -Message "外部通知バッチ実行: $NotifyBat (レベル： $Level)"
         try {
-            # $notifyArgs = "-s", $s, "-i", "`"A $Message`"", "-c", "kibt"
+            # 引数の組み立て
             $notifyArgs = @("-s", $s, "-i", "`"A $Message`"", "-c", "kibt")
 
-            # Start-Process方式に変更
+            # Start-Process方式で実行（非同期起動＋PID取得）
             $process = Start-Process -FilePath $NotifyBat -ArgumentList $notifyArgs -PassThru -WindowStyle Hidden
             
-            # タイムアウト付きで待機
-            if (Wait-Process -Id $process.Id -Timeout $NotifyTimeoutSeconds -ErrorAction SilentlyContinue) {
-                # 正常終了した場合
-                $exitCode = $process.ExitCode
+			# タイムアウト付きで待機（Wait-Processは終了を待つだけなので終了確認を追加）
+			$waited = Wait-Process -Id $process.Id -Timeout $NotifyTimeoutSeconds -ErrorAction SilentlyContinue
 
-                if ($exitCode -ne 0) {
-                    Write-Log -Level "ERROR" -Code "E09996" -Message "通知バッチの実行に失敗しました。戻り値異常: ExitCode=$exitCode | $NotifyBat （レベル： $Level）"
-                } else {
-                    Write-Log -Level "INFO" -Code "I00000" -Message "通知バッチの実行に成功しました： $NotifyBat （レベル： $Level）"
+			if (-not (Get-Process -Id $process.Id -ErrorAction SilentlyContinue)) {
+                # プロセス終了済み → $waited が $false なら「Wait-Process が取りこぼした」
+                if (-not $waited) {
+                    Write-Log -Level "INFO" -Code "I09998" -Message "Wait-Process が false を返しましたが、実際にはプロセスは終了していました: $NotifyBat"
                 }
-
-            } else {
-                # タイムアウトした場合
-                try {
-                    Stop-Process -Id $process.Id -Force -ErrorAction Stop
-                    Write-Log -Level "WARN" -Code "W09999" -Message "タイムアウトした通知バッチを強制終了しました: PID=$($process.Id)"
-                } catch {
-                    # プロセスが既に終了している場合など
-                    Write-Log -Level "INFO" -Code "I09999" -Message "通知バッチ終了処理: Stop-Process 実行時に例外発生（既に終了している可能性あり）: $($_.Exception.Message)"
-                }
-                Write-Log -Level "ERROR" -Code "E09996" -Message "通知バッチの実行がタイムアウトしました（$NotifyTimeoutSeconds 秒）: $NotifyBat"
-            }     
+			    # --- プロセスは既に終了している ---
+			    $exitCode = $process.ExitCode
+			    if ($exitCode -ne 0) {
+			        Write-Log -Level "ERROR" -Code "E09996" -Message "通知バッチの実行に失敗しました。戻り値異常: ExitCode=$exitCode | $NotifyBat （レベル： $Level）"
+			    } else {
+			        Write-Log -Level "INFO" -Code "I00000" -Message "通知バッチの実行に成功しました： $NotifyBat （レベル： $Level）"
+			    }
+			} else {
+			    # --- プロセスはまだ生きている = 本当にタイムアウト ---
+			    try {
+			        Stop-Process -Id $process.Id -Force -ErrorAction Stop
+			        Write-Log -Level "WARN" -Code "W09999" -Message "タイムアウトした通知バッチを強制終了しました: PID=$($process.Id)"
+			    } catch {
+			        Write-Log -Level "INFO" -Code "I09999" -Message "通知バッチ終了処理: Stop-Process 実行時に例外発生（既に終了している可能性あり）: $($_.Exception.Message)"
+			    }
+			    Write-Log -Level "ERROR" -Code "E09996" -Message "通知バッチの実行がタイムアウトしました（$NotifyTimeoutSeconds 秒）: $NotifyBat"
+			}
+   
         }
         catch {
+            # --- 例外処理 ---
             Write-Log -Level "ERROR" -Code "E09996" -Message "通知バッチ実行中に例外が発生: $($_.Exception.Message)"
         }
     } else {
+        # --- バッチファイルが存在しない場合 ---
         Write-Log -Level "ERROR" -Code "E09997" -Message "外部通知バッチが存在しません: $NotifyBat"
     }
 }
@@ -255,11 +262,12 @@ function Invoke-FileAction {
     }
 }
 
+# --- メイン処理 ---
 try {
     # まず基本的なログファイルのパスを設定します（一時的）
     $tempLogFile = Join-Path $env:TEMP "RegistryPolCheck_Init.log"
     $script:LogFile = $tempLogFile
-    Write-Log -Level "INFO" -Code "I00000" -Message "スクリプト開始"
+    Write-Log -Level "INFO" -Code "I00000" -Message "スクリプト実行開始"
 
     # --- 管理者権限チェック ---
     $isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")
@@ -279,7 +287,8 @@ try {
                 $msg = "ディレクトリの作成に失敗しました: $d - $($_.Exception.Message)"
                 Write-Log -Level "ERROR" -Code "E09994" -Message $msg
                 Invoke-Notify -Level "ERROR" -Message $msg
-                throw "必須ディレクトリの作成に失敗したため、スクリプトを終了します。"                
+                # throw "必須ディレクトリの作成に失敗したため、スクリプトを終了します。"
+                exit 1
             }
 		}
 	}
@@ -289,7 +298,6 @@ try {
 		"Machine" = "$env:SystemRoot\System32\GroupPolicy\Machine\Registry.pol"
 	}
 
-	# ==== メイン処理 ====
 	# 日時情報
 	$currentTime = Get-Date
 	$timestamp = $currentTime.ToString("yyyyMMdd_HHmmss")
