@@ -22,15 +22,20 @@
 # - W01002: 古いバックアップ／ログ削除失敗
 # - W01003: ファイル取得失敗
 # - W01004: 管理者権限なし警告
+# - W09997: 互換性警告（LGPO解析で互換性問題検出）
 # - E01001: ファイル存在しません
 # - E01002: サイズ0
-# - E01003: 解析失敗
-# - E09994: 必須ディレクトリ作成失敗
-# - E09995: 不明なファイル操作エラー
-# - E09996: 通知バッチ実行異常
-# - E09997: 通知バッチが存在しない
-# - E09998: Registry.pol に問題検出
-# - E09999: 予期しないエラー
+# - E01003: 解析失敗（LGPO実行がタイムアウトまたは異常終了）
+# - E01004: アクセス拒否/権限不足（LGPOがアクセス拒否で失敗）
+# - E01005: 破損ファイル（LGPOがファイル破損で失敗）
+# - E09993: 必須ディレクトリ作成失敗
+# - E09994: 不明なファイル操作エラー
+# - E09995: 通知バッチ実行異常
+# - E09996: 通知バッチが存在しない
+# - E09997: Registry.pol に問題検出
+# - E09998: 未知のエラー（LGPO解析で未知のエラー検出）
+# - E09999: LGPO実行異常（LGPOプロセスの起動失敗）
+# - E99999: 予期しないエラー
 
 # 実行方法：
 # - スクリプト: powershell.exe -ExecutionPolicy RemoteSigned -File "C:\work\RegistryPolCheck\RegistryPolCheck.ps1"
@@ -56,6 +61,8 @@ param(
     [ValidateScript({Test-Path $_ -IsValid})]
     [string]$LGPOPath = "C:\Tools\LGPO.exe"   # 任意: LGPO.exe のパス
 )
+
+# Set-PSDebug -Trace 2
 
 # 厳密モードの設定
 Set-StrictMode -Version 3.0 
@@ -134,7 +141,7 @@ function Invoke-Notify {
 			    # --- プロセスは既に終了している ---
 			    $exitCode = $process.ExitCode
 			    if ($exitCode -ne 0) {
-			        Write-Log -Level "ERROR" -Code "E09996" -Message "通知バッチの実行に失敗しました。戻り値異常: ExitCode=$exitCode | $NotifyBat （レベル： $Level）"
+			        Write-Log -Level "ERROR" -Code "E09995" -Message "通知バッチの実行に失敗しました。戻り値異常: ExitCode=$exitCode | $NotifyBat （レベル： $Level）"
 			    } else {
 			        Write-Log -Level "INFO" -Code "I00000" -Message "通知バッチの実行に成功しました： $NotifyBat （レベル： $Level）"
 			    }
@@ -146,17 +153,17 @@ function Invoke-Notify {
 			    } catch {
 			        Write-Log -Level "INFO" -Code "I09999" -Message "通知バッチ終了処理: Stop-Process 実行時に例外発生（既に終了している可能性あり）: $($_.Exception.Message)"
 			    }
-			    Write-Log -Level "ERROR" -Code "E09996" -Message "通知バッチの実行がタイムアウトしました（$NotifyTimeoutSeconds 秒）: $NotifyBat"
+			    Write-Log -Level "ERROR" -Code "E09995" -Message "通知バッチの実行がタイムアウトしました（$NotifyTimeoutSeconds 秒）: $NotifyBat"
 			}
    
         }
         catch {
             # --- 例外処理 ---
-            Write-Log -Level "ERROR" -Code "E09996" -Message "通知バッチ実行中に例外が発生: $($_.Exception.Message)"
+            Write-Log -Level "ERROR" -Code "E09995" -Message "通知バッチ実行中に例外が発生: $($_.Exception.Message)"
         }
     } else {
         # --- バッチファイルが存在しない場合 ---
-        Write-Log -Level "ERROR" -Code "E09997" -Message "外部通知バッチが存在しません: $NotifyBat"
+        Write-Log -Level "ERROR" -Code "E09996" -Message "外部通知バッチが存在しません: $NotifyBat"
     }
 }
 
@@ -164,9 +171,21 @@ function Invoke-Notify {
 function Test-PolFile {
     param($path, [ref]$ErrorDetails)
 
-    if (-not (Test-Path $path)) { return "E01001" }   # ファイルなし
+    # 事前初期化（Set-StrictMode を使っている場合に必須）
+    $code = $null
+
+    # 存在チェック    
+    if (-not (Test-Path $path)) {
+        $code = "E01001"
+        return $code
+    }
+
+    # サイズチェック
     $size = (Get-Item $path).Length
-    if ($size -eq 0) { return "E01002" }              # サイズ0
+    if ($size -eq 0) {
+        $code = "E01002"
+        return $code
+    }
 
     # --- LGPO.exe の利用について ---
     # LGPO.exe は Microsoft 提供の Local Group Policy Object Utility であり、
@@ -175,42 +194,158 @@ function Test-PolFile {
     # 一時的に利用部分をコメントアウトしている。
     # 将来的に内容チェックを行う場合は、LGPO.exe を導入し再度有効化すること。
 
-    # LGPO.exe 実行 (timeout付き)
-	try {
-	    $outFile = Join-Path $env:TEMP "lgpo_out.txt"
-	    $errFile = Join-Path $env:TEMP "lgpo_err.txt"
+    # LGPO 実行用ファイルパスが指定されており存在する場合のみ実行
+    if (-not ($LGPOPath) -or -not (Test-Path $LGPOPath)) {
+        # LGPO 未指定または存在しない -> 内容チェックスキップして正常扱い
+        $code = "I00000"
+        return $code
+    }
 
-	    $proc = Start-Process -FilePath $LGPOPath `
-	        -ArgumentList "/parse","/m",$path `
-	        -PassThru `
-	        -NoNewWindow `
-	        -RedirectStandardOutput $outFile `
-	        -RedirectStandardError $errFile
-        
+    # LGPO.exe 実行 (timeout付き)
+    $outFile = Join-Path $env:TEMP "lgpo_out.txt"
+    $errFile = Join-Path $env:TEMP "lgpo_err.txt"    
+	try {
+        # Start-Process で非同期起動し、プロセスオブジェクトを取得
+        $proc = Start-Process -FilePath $LGPOPath `
+            -ArgumentList "/parse","/m",$path `
+            -RedirectStandardOutput $outFile `
+            -RedirectStandardError  $errFile `
+            -NoNewWindow -PassThru -ErrorAction Stop
+        <#
+        # PowerShell 7.0 以降で利用可能な Wait-Process
 		if (-not (Wait-Process -Id $proc.Id -Timeout $LGPOTimeoutSeconds -ErrorAction SilentlyContinue)) {
 		    Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
 		    $ErrorDetails.Value = "LGPO実行がタイムアウトしました（${LGPOTimeoutSeconds}秒）"
 		    return "E01003"
 		}
+        #>
 
+        # .NET の WaitForExit を利用（単位はミリ秒）
+        $ok = $proc.WaitForExit($LGPOTimeoutSeconds * 1000)
+        if (-not $ok) {
+            # --- ② LGPO 実行異常（タイムアウト / プロセスハング） ---
+            $code = "E01003"
+            $msg = "LGPO実行がタイムアウトしました（${LGPOTimeoutSeconds}秒）"
+            Write-Error $msg
+            try {
+                Stop-Process -Id $proc.Id -Force -ErrorAction Stop
+            } catch {
+                $stopMsg = "LGPOプロセスの強制終了に失敗しました: $($_.Exception.Message)"
+                Write-Error $stopMsg
+                $msg = "$msg | $stopMsg"
+            }
+            $ErrorDetails.Value = $msg
+            return $code
+        }
+
+        # --- LGPO の終了コードを確認 ---
 	    if ($proc.ExitCode -ne 0) {
-	        $errorString = if (Test-Path $errFile) {
-	            (Get-Content $errFile -Raw).Trim()
-	        } else {
-	            "詳細エラー情報なし"
-	        }
-	        $ErrorDetails.Value = "LGPO解析に失敗しました: $errorString"
-	        return "E01003"
+            $errText = ""
+            # エラーファイルの内容を確認
+            if (Test-Path $errFile) {
+                $errText = (Get-Content -Path $errFile -Raw -ErrorAction SilentlyContinue).Trim()
+            }
+
+            # 互換性（古いバージョンなど）による解析不可の判定：
+			if ($errText) {
+			    # 改行をスペースに置換して1行にまとめ、長すぎる場合は切り詰める
+			    $singleLine = ($errText -replace "\r?\n", " ").Trim()
+			    if ($singleLine.Length -gt 1000) {
+			        $singleLine = $singleLine.Substring(0,1000) + "..."
+			    }
+
+			    switch -regex ($singleLine) {
+                    # 互換性警告
+			        "parse|解析|invalid" {
+			            $code = "W09997"
+			            $ErrorDetails.Value = "LGPO互換性失敗（Registry.polを解析できませんでした）: $singleLine"
+			            break
+			        }
+                    # 権限エラー
+			        "access|denied|拒否|permission" {
+			            $code = "E01004"
+			            $ErrorDetails.Value = "LGPO権限エラー（アクセス拒否/権限不足）: $singleLine"
+			            break
+			        }
+                    # ファイル破損
+			        "corrupt|壊れている" {
+			            $code = "E01005"
+			            $ErrorDetails.Value = "LGPOファイル破損（Registry.polが壊れています）: $singleLine"
+			            break
+			        }
+                    # その他のエラー
+			        default {
+			            $code = "E09998"   # 未知のエラー
+			            $ErrorDetails.Value = "LGPO不明エラー: $singleLine"
+			        }
+			    }
+			}
+			else {
+			    # 正常（errText が空なら OK）
+			    $code = "I00000"
+			}
+
 	    }
 	}
 	catch {
-	    $ErrorDetails.Value = "LGPO実行異常: $($_.Exception.Message)"
-	    return "E01003"
+	    # --- ② プロセス起動自体が失敗 ---
+        $code = "E09999"
+        $msg = "LGPOプロセスの起動に失敗しました: $($_.Exception.Message)"
+	    $ErrorDetails.Value = $msg
+	    return $code
 	}
 	finally {
-        Remove-Item $outFile,$errFile -ErrorAction SilentlyContinue
+	    # --- ③ エラーファイルの扱いと ErrorDetails の整備 ---
+	    # $code が未定義なら安全のため初期化
+	    if (-not $code) { $code = "E09998" }
+
+	    # outFile は常に削除
+	    if (Test-Path $outFile) {
+	        Remove-Item $outFile -ErrorAction SilentlyContinue
+	    }
+
+	    # errFile の扱い
+	    if ($code -eq "I00000" -or $code -eq "W09997") {
+	        # 正常 or 警告なら errFile も削除
+	        if (Test-Path $errFile) {
+	            Remove-Item $errFile -ErrorAction SilentlyContinue
+	        }
+	    }
+	    else {
+	        # 致命エラー時は errFile を残す
+	        if ((Test-Path $errFile) -and (-not $ErrorDetails.Value)) {
+	            $errText = (Get-Content -Path $errFile -Raw -ErrorAction SilentlyContinue).Trim()
+	            if ($errText) {
+	                $singleLine = ($errText -replace "\r?\n", " ").Trim()
+	                if ($singleLine.Length -gt 1500) { $singleLine = $singleLine.Substring(0,1500) + "..." }
+	                $ErrorDetails.Value = $singleLine
+	            }
+	        }
+	    }
+
+	    # 正常時のみ一時ファイルを削除
+	    if ($code -eq "I00000") {
+	        Remove-Item $outFile,$errFile -ErrorAction SilentlyContinue
+	    } else {
+	        # エラー/警告時は errFile があれば ErrorDetails に詰める（ログ出力は main に任せる）
+	        if ((Test-Path $errFile) -and (-not $ErrorDetails.Value)) {
+	            $errText = (Get-Content -Path $errFile -Raw -ErrorAction SilentlyContinue).Trim()
+	            if ($errText) {
+	                # 改行をスペースに変換して1行にまとめる（長すぎるときは切り詰め）
+	                $singleLine = ($errText -replace "\r?\n", " ").Trim()
+	                if ($singleLine.Length -gt 1500) { $singleLine = $singleLine.Substring(0,1500) + "..." }
+	                $ErrorDetails.Value = $singleLine
+	            }
+	        }
+	        # errFile はデバッグのため残す（必要なら別途クリーンアップポリシーを作る）
+	    }
 	}
-    return "I00000"  # 正常
+   
+    # --- 正常終了 ---
+    if (-not $code) {
+        $code = "I00000"
+    }
+    return $code
 }
 
 # --- ファイル操作ラッパー ---
@@ -242,7 +377,7 @@ function Invoke-FileAction {
             "Copy"   { $errCode = "W01001"; $level = "WARN" }
             "Remove" { $errCode = "W01002"; $level = "WARN" }
             "Get"    { $errCode = "W01003"; $level = "WARN" }
-            default  { $errCode = "E09995"; $level = "ERROR" }
+            default  { $errCode = "E09994"; $level = "ERROR" }
         }
         $msg = "ファイル操作エラー - $Action : $($_.Exception.Message)"
         # Write-Log -Level $level -Code $errCode -Message $msg
@@ -285,7 +420,7 @@ try {
                 Write-Log -Level "INFO" -Code "I00000" -Message "ディレクトリを作成しました: $d"
             } catch {
                 $msg = "ディレクトリの作成に失敗しました: $d - $($_.Exception.Message)"
-                Write-Log -Level "ERROR" -Code "E09994" -Message $msg
+                Write-Log -Level "ERROR" -Code "E09993" -Message $msg
                 Invoke-Notify -Level "ERROR" -Message $msg
                 # throw "必須ディレクトリの作成に失敗したため、スクリプトを終了します。"
                 exit 1
@@ -321,11 +456,18 @@ try {
 	# --- 各POLファイル検査 ---
 	foreach ($key in $polFiles.Keys) {
 		$polPath = $polFiles[$key]
-		$errorDetails = ""
-		$code = Test-PolFile $polPath ([ref]$errorDetails)
+        $errorDetails = [ref]("")
+        $code = Test-PolFile $polPath $errorDetails
 
-		if ($code -eq "I00000") {
-			Write-Log -Level "INFO" -Code $code -Message "$key Registry.pol 検査実施 → 正常"
+
+		if (($code -eq "I00000") -or ($code -eq "W09997")) {
+		    # --- 正常または警告ありで処理継続 ---
+		    if ($code -eq "W09997") {
+		        Write-Log -Level "WARN" -Code $code -Message "$key Registry.pol 検査実施 → 警告、状態 = $($errorDetails.Value)"
+                Write-Log -Level "INFO" -Code "I00000" -Message "$key Registry.pol 検査実施 → 正常（互換性警告あり）"
+		    } else {
+		        Write-Log -Level "INFO" -Code "I00000" -Message "$key Registry.pol 検査実施 → 正常"
+		    }
 
 			# --- バックアップ判定 ---
 			$todayBackup = Get-ChildItem $BackupDir -File -Filter "*${today}*${key}_Registry.pol" -ErrorAction SilentlyContinue
@@ -350,17 +492,23 @@ try {
                 # 配列に強制変換し、最初の要素を取得する
                 $backupPath = @($todayBackup)[0].FullName
 				$msg = "$key Registry.pol バックアップ処理 → 本日分は既に存在するためスキップ: $($backupPath)"
-				Write-Log -Level "INFO" -Code $code -Message $msg
+				Write-Log -Level "INFO" -Code "I00000" -Message $msg
 			}
 		} else {
 			$desc = switch ($code) {
 				"E01001" { "ファイル存在しません" }
 				"E01002" { "サイズ0" }
-				"E01003" { $errorDetails.Value }
-				default  { "未知のエラー" }
+                "E01003" { "解析失敗: $($ErrorDetails.Value)" }
+                "E01004" { "アクセス拒否/権限不足: $($ErrorDetails.Value)" }
+                "E01005" { "破損ファイル: $($ErrorDetails.Value)" }
+                "E09998" { "未知のエラー: $($ErrorDetails.Value)" }
+                "E09999" { "LGPO実行異常: $($ErrorDetails.Value)" }
+                default { "不明コード ($code): $($ErrorDetails.Value)" }
 			}
+            # エラーログ出力
 			Write-Log -Level "ERROR" -Code $code -Message "$key Registry.pol 検査実施 → 異常、状態 = $desc"
 			$problem += "$($key): $code ($desc)"
+
 		}
 	}
 
@@ -401,13 +549,13 @@ try {
 	# --- エラー通知 ---
 	if ($problem.Count -gt 0) {
 		$msg = "Registry.pol ファイルに問題を検出: " + ($problem -join ", ")
-		Write-Log -Level "ERROR" -Code "E09998" -Message $msg
+		Write-Log -Level "ERROR" -Code "E09997" -Message $msg
 		Invoke-Notify -Level "ERROR" -Message $msg
 	}
 }
 catch {
     $msg = "スクリプト実行中に予期しないエラーが発生しました: $($_.Exception.Message)"
-    Write-Log -Level "ERROR" -Code "E09999" -Message $msg    
+    Write-Log -Level "ERROR" -Code "E99999" -Message $msg    
     Invoke-Notify -Level "ERROR" -Message $msg
     exit 1   # タスクスケジューラが失敗と判定できるように、非ゼロ終了コードで終了する
 } finally {
