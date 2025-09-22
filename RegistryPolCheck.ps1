@@ -39,6 +39,16 @@
 
 # 実行方法：
 # - スクリプト: powershell.exe -ExecutionPolicy RemoteSigned -File "C:\work\RegistryPolCheck\RegistryPolCheck.ps1"
+    
+# 作成者: kibt
+# 作成日: 2024-06-20
+# 最終更新: 2024-09-22
+# バージョン: 1.1.0
+
+# 変更履歴:
+# - 2024-06-20: 初版作成
+# - 2024-09-22: W09997（互換性警告）を削除
+
 
 # --- パラメーター定義 ---
 [CmdletBinding()]
@@ -253,14 +263,13 @@ function Test-PolFile {
 			    if ($singleLine.Length -gt 1000) {
 			        $singleLine = $singleLine.Substring(0,1000) + "..."
 			    }
+                
+                if ($singleLine -match "^Parse machine registry.pol\:") {
+                    continue
+                }
 
+                # --- ② LGPO 実行異常（解析失敗） ---
 			    switch -regex ($singleLine) {
-                    # 互換性警告
-			        "parse|解析|invalid" {
-			            $code = "W09997"
-			            $ErrorDetails.Value = "LGPO互換性失敗（Registry.polを解析できませんでした）: $singleLine"
-			            break
-			        }
                     # 権限エラー
 			        "access|denied|拒否|permission" {
 			            $code = "E01004"
@@ -273,10 +282,11 @@ function Test-PolFile {
 			            $ErrorDetails.Value = "LGPOファイル破損（Registry.polが壊れています）: $singleLine"
 			            break
 			        }
-                    # その他のエラー
-			        default {
-			            $code = "E09998"   # 未知のエラー
-			            $ErrorDetails.Value = "LGPO不明エラー: $singleLine"
+                    # 互換性エラー
+			        "cannot parse|解析できません|invalid|failed|error|cannot be read|not valid|not recognized|unsupported|unrecognized|not a valid|not supported|エラー" {
+			            $code = "W09997"
+			            $ErrorDetails.Value = "LGPO互換性失敗（Registry.polを解析できませんでした）: $singleLine"
+			            break
 			        }
 			    }
 			}
@@ -289,15 +299,13 @@ function Test-PolFile {
 	}
 	catch {
 	    # --- ② プロセス起動自体が失敗 ---
-        $code = "E09999"
+        $code = "E09998"
         $msg = "LGPOプロセスの起動に失敗しました: $($_.Exception.Message)"
 	    $ErrorDetails.Value = $msg
 	    return $code
 	}
 	finally {
 	    # --- ③ エラーファイルの扱いと ErrorDetails の整備 ---
-	    # $code が未定義なら安全のため初期化
-	    if (-not $code) { $code = "E09998" }
 
 	    # outFile は常に削除
 	    if (Test-Path $outFile) {
@@ -305,8 +313,8 @@ function Test-PolFile {
 	    }
 
 	    # errFile の扱い
-	    if ($code -eq "I00000" -or $code -eq "W09997") {
-	        # 正常 or 警告なら errFile も削除
+	    if ($code -eq "I00000") {
+	        # 正常なら errFile を削除
 	        if (Test-Path $errFile) {
 	            Remove-Item $errFile -ErrorAction SilentlyContinue
 	        }
@@ -338,6 +346,19 @@ function Test-PolFile {
 	            }
 	        }
 	        # errFile はデバッグのため残す（必要なら別途クリーンアップポリシーを作る）
+	    }
+
+	    # --- ④ tempLogFile を正式ログにマージして削除 ---
+	    if (Test-Path $tempLogFile) {
+	        try {
+	            if ($LogFile -and (Test-Path $LogFile)) {
+	                Get-Content $tempLogFile | Add-Content -Path $LogFile -Encoding Default -ErrorAction Stop
+	            }
+	        } catch {
+	            # マージ失敗時は無視（最低限 tempLogFile は残す）
+	        }
+	        # マージに成功した場合のみ削除
+	        try { Remove-Item $tempLogFile -ErrorAction SilentlyContinue } catch {}
 	    }
 	}
    
@@ -460,14 +481,9 @@ try {
         $code = Test-PolFile $polPath $errorDetails
 
 
-		if (($code -eq "I00000") -or ($code -eq "W09997")) {
-		    # --- 正常または警告ありで処理継続 ---
-		    if ($code -eq "W09997") {
-		        Write-Log -Level "WARN" -Code $code -Message "$key Registry.pol 検査実施 → 警告、状態 = $($errorDetails.Value)"
-                Write-Log -Level "INFO" -Code "I00000" -Message "$key Registry.pol 検査実施 → 正常（互換性警告あり）"
-		    } else {
-		        Write-Log -Level "INFO" -Code "I00000" -Message "$key Registry.pol 検査実施 → 正常"
-		    }
+		if ($code -eq "I00000") {
+		    # --- 正常処理 ---
+		    Write-Log -Level "INFO" -Code "I00000" -Message "$key Registry.pol 検査実施 → 正常"
 
 			# --- バックアップ判定 ---
 			$todayBackup = Get-ChildItem $BackupDir -File -Filter "*${today}*${key}_Registry.pol" -ErrorAction SilentlyContinue
@@ -498,10 +514,10 @@ try {
 			$desc = switch ($code) {
 				"E01001" { "ファイル存在しません" }
 				"E01002" { "サイズ0" }
-                "E01003" { "解析失敗: $($ErrorDetails.Value)" }
+                "E01003" { "LGPO実行タイムアウト: $($ErrorDetails.Value)" }
                 "E01004" { "アクセス拒否/権限不足: $($ErrorDetails.Value)" }
                 "E01005" { "破損ファイル: $($ErrorDetails.Value)" }
-                "E09998" { "未知のエラー: $($ErrorDetails.Value)" }
+                "E01006" { "LGPO互換性失敗: $($ErrorDetails.Value)" }
                 "E09999" { "LGPO実行異常: $($ErrorDetails.Value)" }
                 default { "不明コード ($code): $($ErrorDetails.Value)" }
 			}
