@@ -353,12 +353,11 @@ function Test-PolFile {
 	        try {
 	            if ($LogFile -and (Test-Path $LogFile)) {
 	                Get-Content $tempLogFile | Add-Content -Path $LogFile -Encoding Default -ErrorAction Stop
-	            }
+                    Remove-Item $tempLogFile -ErrorAction SilentlyContinue
+                }
 	        } catch {
 	            # マージ失敗時は無視（最低限 tempLogFile は残す）
 	        }
-	        # マージに成功した場合のみ削除
-	        try { Remove-Item $tempLogFile -ErrorAction SilentlyContinue } catch {}
 	    }
 	}
    
@@ -571,6 +570,7 @@ try {
 }
 catch {
     $msg = "スクリプト実行中に予期しないエラーが発生しました: $($_.Exception.Message)"
+    $script:LogFile = $LogFile    
     Write-Log -Level "ERROR" -Code "E99999" -Message $msg    
     Invoke-Notify -Level "ERROR" -Message $msg
     exit 1   # タスクスケジューラが失敗と判定できるように、非ゼロ終了コードで終了する
