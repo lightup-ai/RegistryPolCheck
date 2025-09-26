@@ -576,7 +576,7 @@ catch {
     exit 1   # タスクスケジューラが失敗と判定できるように、非ゼロ終了コードで終了する
 } finally {
     # 一時ログ (Init用) を削除する
-    Remove-Item $tempLogFile -ErrorAction SilentlyContinue
+    # Remove-Item $tempLogFile -ErrorAction SilentlyContinue
 
     # スクリプト完了ログ
     if ($script:LogFile) {
