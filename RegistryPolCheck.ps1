@@ -570,7 +570,6 @@ try {
 }
 catch {
     $msg = "スクリプト実行中に予期しないエラーが発生しました: $($_.Exception.Message)"
-    $script:LogFile = $LogFile    
     Write-Log -Level "ERROR" -Code "E99999" -Message $msg    
     Invoke-Notify -Level "ERROR" -Message $msg
     exit 1   # タスクスケジューラが失敗と判定できるように、非ゼロ終了コードで終了する
