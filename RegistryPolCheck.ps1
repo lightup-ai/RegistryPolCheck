@@ -48,6 +48,9 @@
 # 変更履歴:
 # - 2024-06-20: 初版作成
 # - 2024-09-22: W09997（互換性警告）を削除
+# - 2024-10-06: TecPostログにプログラム名を記載
+# - 2024-10-07: LGPO.exe 未指定または存在しません の場合に E09992 を返すように変更
+# - 2024-10-08: 古いログ削除の条件を「更新日時」から「ファイル名の日付」に変更
 
 
 # --- パラメーター定義 ---
@@ -207,7 +210,8 @@ function Test-PolFile {
     # LGPO 実行用ファイルパスが指定されており存在する場合のみ実行
     if (-not ($LGPOPath) -or -not (Test-Path $LGPOPath)) {
         # LGPO 未指定または存在しない -> 内容チェックスキップして正常扱い
-        $code = "I00000"
+        # $code = "I00000"
+        $code = "E09992"  # LGPO未指定/存在しないため内容チェックをスキップ
         return $code
     }
 
@@ -235,12 +239,12 @@ function Test-PolFile {
         if (-not $ok) {
             # --- ② LGPO 実行異常（タイムアウト / プロセスハング） ---
             $code = "E01003"
-            $msg = "LGPO実行がタイムアウトしました（${LGPOTimeoutSeconds}秒）"
+            $msg = "$script:TPLogPrefix LGPO実行がタイムアウトしました（${LGPOTimeoutSeconds}秒）"
             Write-Error $msg
             try {
                 Stop-Process -Id $proc.Id -Force -ErrorAction Stop
             } catch {
-                $stopMsg = "LGPOプロセスの強制終了に失敗しました: $($_.Exception.Message)"
+                $stopMsg = "$script:TPLogPrefix LGPOプロセスの強制終了に失敗しました: $($_.Exception.Message)"
                 Write-Error $stopMsg
                 $msg = "$msg | $stopMsg"
             }
@@ -300,7 +304,7 @@ function Test-PolFile {
 	catch {
 	    # --- ② プロセス起動自体が失敗 ---
         $code = "E09998"
-        $msg = "LGPOプロセスの起動に失敗しました: $($_.Exception.Message)"
+        $msg = "$script:TPLogPrefix LGPOプロセスの起動に失敗しました: $($_.Exception.Message)"
 	    $ErrorDetails.Value = $msg
 	    return $code
 	}
@@ -399,7 +403,7 @@ function Invoke-FileAction {
             "Get"    { $errCode = "W01003"; $level = "WARN" }
             default  { $errCode = "E09994"; $level = "ERROR" }
         }
-        $msg = "ファイル操作エラー - $Action : $($_.Exception.Message)"
+        $msg = "$script:TPLogPrefix ファイル操作エラー - $Action : $($_.Exception.Message)"
         # Write-Log -Level $level -Code $errCode -Message $msg
 
         <#
@@ -419,7 +423,13 @@ function Invoke-FileAction {
 
 # --- メイン処理 ---
 try {
-    # まず基本的なログファイルのパスを設定します（一時的）
+    # 現在のプログラム名を取得する
+    # $scriptName = (Get-Item -Path $MyInvocation.MyCommand.Path).BaseName
+    # $scriptName = [Sys.IO.Path]::GetFileNameWithoutExtension($MyInvocation.MyCommand.Path)
+    $scriptName = [Sys.IO.Path]::GetFileName($PSCommandPath)     # PowerShell 3.0 以降
+    $script:TPLogPrefix = "[$scriptName]"
+
+    # 基本的なログファイルのパスを設定します（一時的）
     $tempLogFile = Join-Path $env:TEMP "RegistryPolCheck_Init.log"
     $script:LogFile = $tempLogFile
     Write-Log -Level "INFO" -Code "I00000" -Message "スクリプト実行開始"
@@ -427,7 +437,7 @@ try {
     # --- 管理者権限チェック ---
     $isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")
     if (-not $isAdmin) {
-        $msg = "管理者権限で実行されていません。正常に動作しない可能性があります。"
+        $msg = "$script:TPLogPrefix 管理者権限で実行されていません。正常に動作しない可能性があります。"
         Write-Log -Level "WARN" -Code "W01004" -Message $msg
         Invoke-Notify -Level "WARN" -Message $msg
     }
@@ -439,7 +449,7 @@ try {
                 New-Item -ItemType Directory -Path $d -Force -ErrorAction Stop | Out-Null
                 Write-Log -Level "INFO" -Code "I00000" -Message "ディレクトリを作成しました: $d"
             } catch {
-                $msg = "ディレクトリの作成に失敗しました: $d - $($_.Exception.Message)"
+                $msg = "$script:TPLogPrefix ディレクトリの作成に失敗しました: $d - $($_.Exception.Message)"
                 Write-Log -Level "ERROR" -Code "E09993" -Message $msg
                 Invoke-Notify -Level "ERROR" -Message $msg
                 # throw "必須ディレクトリの作成に失敗したため、スクリプトを終了します。"
@@ -495,11 +505,12 @@ try {
 					$msg = "$key Registry.pol バックアップ処理 → 成功: $backupPath"
 					Write-Log -Level "INFO" -Code "I00000" -Message $msg
 				} elseif ($result.Level -eq "WARN") {
-					$msg = "$key Registry.pol バックアップ処理 → 失敗: $($result.Message)"
+					$msg = "$script:TPLogPrefix $key Registry.pol バックアップ処理 → 失敗: $($result.Message)"
 					Write-Log -Level "WARN" -Code $result.ErrCode -Message $msg
 					Invoke-Notify -Level "WARN" -Message $msg   
 				} elseif ($result.Level -eq "ERROR") {
-					Write-Log -Level "ERROR" -Code $result.ErrCode -Message $result.Message
+                    $msg = "$script:TPLogPrefix $result.Message"
+					Write-Log -Level "ERROR" -Code $result.ErrCode -Message $msg
 					Invoke-Notify -Level "ERROR" -Message $result.Message
 				}
 
@@ -517,11 +528,12 @@ try {
                 "E01004" { "アクセス拒否/権限不足: $($ErrorDetails.Value)" }
                 "E01005" { "破損ファイル: $($ErrorDetails.Value)" }
                 "E01006" { "LGPO互換性失敗: $($ErrorDetails.Value)" }
-                "E09999" { "LGPO実行異常: $($ErrorDetails.Value)" }
+                "E09992" { "LGPO.exe 未指定または存在しません" }
+                "E09998" { "LGPO実行異常: $($ErrorDetails.Value)" }
                 default { "不明コード ($code): $($ErrorDetails.Value)" }
 			}
             # エラーログ出力
-			Write-Log -Level "ERROR" -Code $code -Message "$key Registry.pol 検査実施 → 異常、状態 = $desc"
+			Write-Log -Level "ERROR" -Code $code -Message "$script:TPLogPrefix $key Registry.pol 検査実施 → 異常、状態 = $desc"
 			$problem += "$($key): $code ($desc)"
 
 		}
@@ -531,24 +543,57 @@ try {
 	Write-Log -Level "INFO" -Code "I00000" -Message "検査終了"
 
 	# --- 古いバックアップ削除 ---
-	Get-ChildItem $BackupDir -File -Filter "*Registry.pol" |
-		Sort-Object LastWriteTime -Descending |
-		Select-Object -Skip $MaxBackup |
-		ForEach-Object {
-			$result = Invoke-FileAction -Action "Remove" -Params @{ Path = $_.FullName; Force = $true }
-			if ($result.Level -eq "INFO") {
-				$msg = "古いバックアップ削除 → $($_.FullName)"
-				Write-Log -Level "INFO" -Code "I00000" -Message $msg
-			} elseif ($result.Level -eq "WARN") {
-				$msg = "古いバックアップ削除 → 失敗: $($result.Message)"
-				Write-Log -Level $result.Level -Code $result.ErrCode -Message $msg
-				Invoke-Notify -Level $result.Level -Message $msg
-			}
-		}
+    $pattern = '^\d{8}_\d{6}'
+	$files = Get-ChildItem $BackupDir -File -Filter "*Registry.pol" |
+        Where-Object { $_.Name -match $pattern }  # 日時形式のファイル名のみ対象
+    $sortedFiles = $files | Sort-Object {
+        $match = [regex]::Match($_.Name, $pattern)
+        if ($match.Success) {
+            [datetime]::ParseExact($match.Value, "yyyyMMdd_HHmmss", $null)
+        } else {
+            [datetime]::MinValue  # マッチしない場合は最小値にして最後にソートされるようにする
+        }
+    } -Descending
+    $filesToDelete = $sortedFiles | Select-Object -Skip $MaxBackup
+    foreach ($file in $filesToDelete) {
+        $result = Invoke-FileAction -Action "Remove" -Params @{ Path = $file.FullName; Force = $true }
+        if ($result.Level -eq "INFO") {
+            $msg = "古いバックアップ削除 → $($file.FullName)"
+            Write-Log -Level "INFO" -Code "I00000" -Message $msg
+        } elseif ($result.Level -eq "WARN") {
+            $msg = "$script:TPLogPrefix 古いバックアップ削除 → 失敗: $($result.Message)"
+            Write-Log -Level $result.Level -Code $result.ErrCode -Message $msg
+            Invoke-Notify -Level $result.Level -Message $msg
+        }
+    }
 
 	# --- 古いログ削除 ---
+	$cutoffDate = (Get-Date).Date.AddDays(-$LogRetentionDays)
+
 	Get-ChildItem $LogDir -File -Filter "RegistryPol_*.log" |
-		Where-Object { $_.LastWriteTime -lt (Get-Date).AddDays(-$LogRetentionDays) } |
+	    Where-Object { 
+	        # ファイル名から日付を抽出して比較
+	        if ($_.Name -match 'RegistryPol_(\d{8})\.log') {
+	            $fileDate = [datetime]::ParseExact($matches[1], "yyyyMMdd", $null)
+	            return $fileDate -lt $cutoffDate
+	        }
+	        return $false
+	    } |
+	    ForEach-Object {
+	        $result = Invoke-FileAction -Action "Remove" -Params @{ Path = $_.FullName; Force = $true }
+	        if ($result.Level -eq "INFO") {
+	            $msg = "古いログ削除 → $($_.FullName)"
+	            Write-Log -Level "INFO" -Code "I00000" -Message $msg
+	        } elseif ($result.Level -eq "WARN") {
+	            $msg = "$script:TPLogPrefix 古いログ削除 → 失敗: $($result.Message)"
+	            Write-Log -Level $result.Level -Code $result.ErrCode -Message $msg
+	            Invoke-Notify -Level $result.Level -Message $msg
+	        }
+	    }
+
+    <#
+	Get-ChildItem $LogDir -File -Filter "RegistryPol_*.log" |
+		Where-Object { $_.CreationTime -lt (Get-Date).AddDays(-$LogRetentionDays) } |
 		ForEach-Object {
 			$result = Invoke-FileAction -Action "Remove" -Params @{ Path = $_.FullName; Force = $true }
 			if ($result.Level -eq "INFO") {
@@ -560,16 +605,17 @@ try {
 				Invoke-Notify -Level $result.Level -Message $msg
 			}
 		}
+    #>
 
 	# --- エラー通知 ---
 	if ($problem.Count -gt 0) {
-		$msg = "Registry.pol ファイルに問題を検出: " + ($problem -join ", ")
+		$msg = "$script:TPLogPrefix Registry.pol ファイルに異常を検出: " + ($problem -join ", ")
 		Write-Log -Level "ERROR" -Code "E09997" -Message $msg
 		Invoke-Notify -Level "ERROR" -Message $msg
 	}
 }
 catch {
-    $msg = "スクリプト実行中に予期しないエラーが発生しました: $($_.Exception.Message)"
+    $msg = "$script:TPLogPrefix スクリプト実行中に予期しないエラーが発生しました: $($_.Exception.Message)"
     Write-Log -Level "ERROR" -Code "E99999" -Message $msg    
     Invoke-Notify -Level "ERROR" -Message $msg
     exit 1   # タスクスケジューラが失敗と判定できるように、非ゼロ終了コードで終了する
