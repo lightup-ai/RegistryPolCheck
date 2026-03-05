@@ -1,7 +1,16 @@
 # RegistryPolCheck.ps1
 # 処理概要： 本スクリプトは Windows サーバー上で利用されるローカルグループポリシー設定ファイル Registry.pol の健全性を確認し、異常を検知した場合にログ出力および通知を行うツールです。
+# また、正常な場合は日次でバックアップを取得し、古いバックアップやログを自動的に削除します。
+# 設定可能なパラメーターを利用して、バックアップ保存数やログ保存期間、通知バッチのパスなどをカスタマイズできます。
+# LGPO.exe を利用して Registry.pol の内容を解析し、異常がないかを確認します。
+# ただし LGPO.exe は必須ではなく、存在しない場合はファイルの存在とサイズのみをチェックします。
+# LGPO.exe は Microsoft から無償で提供されており、必要に応じて導入してください。
+# https://www.microsoft.com/en-us/download/details.aspx?id=55319
+# なお、LGPO.exe を利用する場合は、スクリプト内の該当部分のコメントアウトを解除してください。
+
 # 機能概要：
 # - Registry.pol ファイルの存在確認とサイズチェック
+# - LGPO.exe を利用した内容解析（オプション）
 # - 日次バックアップの取得（重複防止）
 # - 古いバックアップとログの自動削除
 # - ログファイルへの詳細なログ出力（INFO / ERROR レベル）
@@ -16,11 +25,16 @@
 # - W09997: 互換性警告（LGPO解析で互換性問題検出）
 # - E01001: ファイル存在しません
 # - E01002: サイズ0
+# - E01003: 解析失敗（LGPO実行がタイムアウトまたは異常終了）
+# - E01004: アクセス拒否/権限不足（LGPOがアクセス拒否で失敗）
+# - E01005: 破損ファイル（LGPOがファイル破損で失敗）
 # - E09993: 必須ディレクトリ作成失敗
 # - E09994: 不明なファイル操作エラー
 # - E09995: 通知バッチ実行異常
 # - E09996: 通知バッチが存在しない
 # - E09997: Registry.pol に問題検出
+# - E09998: 未知のエラー（LGPO解析で未知のエラー検出）
+# - E09999: LGPO実行異常（LGPOプロセスの起動失敗）
 # - E99999: 予期しないエラー
 
 # 実行方法：
@@ -37,8 +51,6 @@
 # - 2024-10-06: TecPostログにプログラム名を記載
 # - 2024-10-07: LGPO.exe 未指定または存在しません の場合に E09992 を返すように変更
 # - 2024-10-08: 古いログ削除の条件を「更新日時」から「ファイル名の日付」に変更
-# - 2024-10-09: LGPO.exe の実行方法を Start-Process + WaitForExit に変更し、タイムアウト処理を強化
-# - 2026-03-05: タイムアウト発生したので、LGPO.exeの利用処理を削除し、内容チェックは行わないように変更（LGPO.exe の利用は任意で残す）
 
 
 # --- パラメーター定義 ---
@@ -57,8 +69,10 @@ param(
     [int]$LogRetentionDays = 7,
 
     [ValidateScript({Test-Path $_ -IsValid})]
-    [string]$NotifyBat = "C:\Scripts\TexpostNotify.bat"
+    [string]$NotifyBat = "C:\Scripts\TexpostNotify.bat",
 
+    [ValidateScript({Test-Path $_ -IsValid})]
+    [string]$LGPOPath = "C:\Tools\LGPO.exe"   # 任意: LGPO.exe のパス
 )
 
 # Set-PSDebug -Trace 2
@@ -68,7 +82,8 @@ Set-StrictMode -Version 3.0
 
 # --- グローバル変数 ---
 $script:LogFile = $null  # ログファイルパス（実行時に設定される）
-$NotifyTimeoutSeconds = 30  # 通知バッチのタイムアウト時間（秒）
+$NotifyTimeoutSeconds = 30
+$LGPOTimeoutSeconds   = 30
 
 # グローバルエラー処理設定
 $ErrorActionPreference = "Continue"  # エラーが発生した場合でも実行を継続する
@@ -184,6 +199,171 @@ function Test-PolFile {
         $code = "E01002"
         return $code
     }
+
+    # --- LGPO.exe の利用について ---
+    # LGPO.exe は Microsoft 提供の Local Group Policy Object Utility であり、
+    # Registry.pol の内容を解析するために使用可能。
+    # ただし本サーバーに LGPO.exe が存在しない可能性があるため、
+    # 一時的に利用部分をコメントアウトしている。
+    # 将来的に内容チェックを行う場合は、LGPO.exe を導入し再度有効化すること。
+
+    # LGPO 実行用ファイルパスが指定されており存在する場合のみ実行
+    if (-not ($LGPOPath) -or -not (Test-Path $LGPOPath)) {
+        # LGPO 未指定または存在しない -> 内容チェックスキップして正常扱い
+        # $code = "I00000"
+        $code = "E09992"  # LGPO未指定/存在しないため内容チェックをスキップ
+        return $code
+    }
+
+    # LGPO.exe 実行 (timeout付き)
+    $outFile = Join-Path $env:TEMP "lgpo_out.txt"
+    $errFile = Join-Path $env:TEMP "lgpo_err.txt"    
+	try {
+        # Start-Process で非同期起動し、プロセスオブジェクトを取得
+        $proc = Start-Process -FilePath $LGPOPath `
+            -ArgumentList "/parse","/m",$path `
+            -RedirectStandardOutput $outFile `
+            -RedirectStandardError  $errFile `
+            -NoNewWindow -PassThru -ErrorAction Stop
+        <#
+        # PowerShell 7.0 以降で利用可能な Wait-Process
+		if (-not (Wait-Process -Id $proc.Id -Timeout $LGPOTimeoutSeconds -ErrorAction SilentlyContinue)) {
+		    Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+		    $ErrorDetails.Value = "LGPO実行がタイムアウトしました（${LGPOTimeoutSeconds}秒）"
+		    return "E01003"
+		}
+        #>
+
+        # .NET の WaitForExit を利用（単位はミリ秒）
+        $ok = $proc.WaitForExit($LGPOTimeoutSeconds * 1000)
+        if (-not $ok) {
+            # --- ② LGPO 実行異常（タイムアウト / プロセスハング） ---
+            $code = "E01003"
+            $msg = "$script:TPLogPrefix LGPO実行がタイムアウトしました（${LGPOTimeoutSeconds}秒）"
+            Write-Error $msg
+            try {
+                Stop-Process -Id $proc.Id -Force -ErrorAction Stop
+            } catch {
+                $stopMsg = "$script:TPLogPrefix LGPOプロセスの強制終了に失敗しました: $($_.Exception.Message)"
+                Write-Error $stopMsg
+                $msg = "$msg | $stopMsg"
+            }
+            $ErrorDetails.Value = $msg
+            return $code
+        }
+
+        # --- LGPO の終了コードを確認 ---
+	    if ($proc.ExitCode -ne 0) {
+            $errText = ""
+            # エラーファイルの内容を確認
+            if (Test-Path $errFile) {
+                $errText = (Get-Content -Path $errFile -Raw -ErrorAction SilentlyContinue).Trim()
+            }
+
+            # 互換性（古いバージョンなど）による解析不可の判定：
+			if ($errText) {
+			    # 改行をスペースに置換して1行にまとめ、長すぎる場合は切り詰める
+			    $singleLine = ($errText -replace "\r?\n", " ").Trim()
+			    if ($singleLine.Length -gt 1000) {
+			        $singleLine = $singleLine.Substring(0,1000) + "..."
+			    }
+                
+                if ($singleLine -match "^Parse machine registry.pol\:") {
+                    continue
+                }
+
+                # --- ② LGPO 実行異常（解析失敗） ---
+			    switch -regex ($singleLine) {
+                    # 権限エラー
+			        "access|denied|拒否|permission" {
+			            $code = "E01004"
+			            $ErrorDetails.Value = "LGPO権限エラー（アクセス拒否/権限不足）: $singleLine"
+			            break
+			        }
+                    # ファイル破損
+			        "corrupt|壊れている" {
+			            $code = "E01005"
+			            $ErrorDetails.Value = "LGPOファイル破損（Registry.polが壊れています）: $singleLine"
+			            break
+			        }
+                    # 互換性エラー
+			        "cannot parse|解析できません|invalid|failed|error|cannot be read|not valid|not recognized|unsupported|unrecognized|not a valid|not supported|エラー" {
+			            $code = "W09997"
+			            $ErrorDetails.Value = "LGPO互換性失敗（Registry.polを解析できませんでした）: $singleLine"
+			            break
+			        }
+			    }
+			}
+			else {
+			    # 正常（errText が空なら OK）
+			    $code = "I00000"
+			}
+
+	    }
+	}
+	catch {
+	    # --- ② プロセス起動自体が失敗 ---
+        $code = "E09998"
+        $msg = "$script:TPLogPrefix LGPOプロセスの起動に失敗しました: $($_.Exception.Message)"
+	    $ErrorDetails.Value = $msg
+	    return $code
+	}
+	finally {
+	    # --- ③ エラーファイルの扱いと ErrorDetails の整備 ---
+
+	    # outFile は常に削除
+	    if (Test-Path $outFile) {
+	        Remove-Item $outFile -ErrorAction SilentlyContinue
+	    }
+
+	    # errFile の扱い
+	    if ($code -eq "I00000") {
+	        # 正常なら errFile を削除
+	        if (Test-Path $errFile) {
+	            Remove-Item $errFile -ErrorAction SilentlyContinue
+	        }
+	    }
+	    else {
+	        # 致命エラー時は errFile を残す
+	        if ((Test-Path $errFile) -and (-not $ErrorDetails.Value)) {
+	            $errText = (Get-Content -Path $errFile -Raw -ErrorAction SilentlyContinue).Trim()
+	            if ($errText) {
+	                $singleLine = ($errText -replace "\r?\n", " ").Trim()
+	                if ($singleLine.Length -gt 1500) { $singleLine = $singleLine.Substring(0,1500) + "..." }
+	                $ErrorDetails.Value = $singleLine
+	            }
+	        }
+	    }
+
+	    # 正常時のみ一時ファイルを削除
+	    if ($code -eq "I00000") {
+	        Remove-Item $outFile,$errFile -ErrorAction SilentlyContinue
+	    } else {
+	        # エラー/警告時は errFile があれば ErrorDetails に詰める（ログ出力は main に任せる）
+	        if ((Test-Path $errFile) -and (-not $ErrorDetails.Value)) {
+	            $errText = (Get-Content -Path $errFile -Raw -ErrorAction SilentlyContinue).Trim()
+	            if ($errText) {
+	                # 改行をスペースに変換して1行にまとめる（長すぎるときは切り詰め）
+	                $singleLine = ($errText -replace "\r?\n", " ").Trim()
+	                if ($singleLine.Length -gt 1500) { $singleLine = $singleLine.Substring(0,1500) + "..." }
+	                $ErrorDetails.Value = $singleLine
+	            }
+	        }
+	        # errFile はデバッグのため残す（必要なら別途クリーンアップポリシーを作る）
+	    }
+
+	    # --- ④ tempLogFile を正式ログにマージして削除 ---
+	    if (Test-Path $tempLogFile) {
+	        try {
+	            if ($LogFile -and (Test-Path $LogFile)) {
+	                Get-Content $tempLogFile | Add-Content -Path $LogFile -Encoding Default -ErrorAction Stop
+                    Remove-Item $tempLogFile -ErrorAction SilentlyContinue
+                }
+	        } catch {
+	            # マージ失敗時は無視（最低限 tempLogFile は残す）
+	        }
+	    }
+	}
    
     # --- 正常終了 ---
     if (-not $code) {
@@ -344,6 +524,12 @@ try {
 			$desc = switch ($code) {
 				"E01001" { "ファイル存在しません" }
 				"E01002" { "サイズ0" }
+                "E01003" { "LGPO実行タイムアウト: $($ErrorDetails.Value)" }
+                "E01004" { "アクセス拒否/権限不足: $($ErrorDetails.Value)" }
+                "E01005" { "破損ファイル: $($ErrorDetails.Value)" }
+                "E01006" { "LGPO互換性失敗: $($ErrorDetails.Value)" }
+                "E09992" { "LGPO.exe 未指定または存在しません" }
+                "E09998" { "LGPO実行異常: $($ErrorDetails.Value)" }
                 default { "不明コード ($code): $($ErrorDetails.Value)" }
 			}
             # エラーログ出力
